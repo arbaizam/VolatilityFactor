@@ -1,0 +1,36 @@
+---
+data_settings:
+  loc_output: output
+  output_filename: combined_vars_2024-12-31.xlsx
+
+garch_settings:
+  last_sample_date: "2024-12-31"
+  horizon1: 63
+  horizon2: 252
+  nsims: 10000
+  number_of_periods: 3
+  sample_years: 9
+  forecast_months: 12
+  forecast_lag: 3
+  var_type: [long_term] #one of "long_term", "normal", "short_term", "stress_var" (comman seperated list)
+  start_point_quantiles: [0.50] #, 0.75, 0.95]
+
+var_settings:
+
+  G1P0:
+    tickers: [G1P0]
+    ndays: [10, 252]
+    weights: None
+  G2P0:
+    tickers: [G2P0]
+    ndays: [10, 252]
+    weights: None
+  G6P0[50];G9P0[50]:
+    tickers: [G6P0, G9P0]
+    ndays: [10, 252]
+    weights: [.50,.50]
+  agy_cmo: 
+    tickers: [CMOS]
+    ndays: [10, 252]
+    weights: None
+  
