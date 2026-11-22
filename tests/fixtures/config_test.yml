@@ -14,7 +14,6 @@ garch_settings:
   sample_years: 9
   forecast_months: 12
   forecast_lag: 3
-  var_type: [long_term, normal, short_term, stress_var]
   start_point_quantiles: [0.50, 0.95]
 
 var_settings:

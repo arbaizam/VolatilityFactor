@@ -79,7 +79,6 @@ class GarchSettings:
     sample_years: int
     forecast_months: int
     forecast_lag: int
-    var_type: tuple[str, ...] = ("long_term",)
     start_point_quantiles: tuple[float, ...] = (0.50,)
 
     @classmethod
@@ -98,7 +97,6 @@ class GarchSettings:
             sample_years=int(values["sample_years"]),
             forecast_months=int(values["forecast_months"]),
             forecast_lag=int(values["forecast_lag"]),
-            var_type=tuple(values.get("var_type", ("long_term",))),
             start_point_quantiles=tuple(values.get("start_point_quantiles", (0.50,))),
         )
 

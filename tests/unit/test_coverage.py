@@ -194,3 +194,4 @@ def test_heatmap(synthetic):
     """The heatmap has one row per ticker."""
     fig = synthetic.plot_observation_counts(tickers=["A", "B", "C"])
     assert isinstance(fig, go.Figure) and list(fig.data[0].y) == ["A", "B", "C"]
+    assert fig.data[0].colorscale == ((0.0, "#003359"), (1.0, "#93B1CC"))

@@ -36,6 +36,9 @@ vf.run_circular_bootstrap().save()
 
 ## Configuration and data
 
+The configured GARCH run uses `custom_normal` shocks and draws starting values from the
+last year of each sample at the configured quantiles.
+
 Nothing is read at import time.
 
 | What | Lookup order |
@@ -115,6 +118,23 @@ publishing new VaR results.
 Batch backtesting assigns each VaR quantile its expected exception rate. For example,
 95% VaR uses a 5% rate. The test report includes the number of usable returns. A window
 with zero returns has blank statistics and a blank independence decision.
+
+### Quarterly drawdown
+
+`drawdown_report()` finds the worst 10-day log return ending in each monitoring quarter.
+It uses configured portfolio weights and includes factors with a 10-day liquidation horizon.
+The report gives the corresponding arithmetic loss as a percentage and shows the dates of
+the window.
+
+```python
+from volatility_factor import monitoring
+
+periods = monitoring.MonitoringPeriods.from_config()
+drawdowns = monitoring.drawdown_report(periods, quarters=[1, 2, 3])
+```
+
+Plotly charts use the FHLBank Topeka color palette. Negative returns and backtest breaks
+are highlighted in red.
 
 ## Tests
 

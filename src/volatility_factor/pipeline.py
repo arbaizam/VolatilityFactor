@@ -23,19 +23,7 @@ from volatility_factor.config import Config, FactorConfig, get_config
 from volatility_factor.data import PricingData, get_data
 from volatility_factor.garch import GarchSim
 from volatility_factor.nonparametric import NonParametricVar
-from volatility_factor.periods import get_stress_range_multi, get_stress_range_single
 from volatility_factor.results import to_long
-
-#: ``garch_settings.var_type`` value -> (shock type, ``Method`` label prefix).
-#: They always run in this order.
-VAR_TYPES = {
-    "long_term": ("custom_normal", "long_term_var"),
-    "normal": ("normal", "normal_var"),
-    "short_term": ("custom_bootstrap", "short_term_var"),
-    "stress_var": ("custom_bootstrap", "stress_var"),
-}
-STRESS_WINDOW_DAYS = 126
-STRESS_ALPHA = 0.99
 
 
 def _output_file(output_file: str | os.PathLike | None, config: Config) -> Path:
@@ -143,18 +131,6 @@ def _coverage_failure(
     }
 
 
-def _stress_window(garch: GarchSim) -> list[str]:
-    """The most volatile 126-day window in the model's sample (99th percentile)."""
-    returns = garch.log_return_matrix[garch.sample_start : garch.sample_end].copy()
-    if garch.single_index is True:
-        return get_stress_range_single(start=garch.sample_start, end=garch.sample_end,
-                                       ndays=STRESS_WINDOW_DAYS, returns=returns,
-                                       alpha=STRESS_ALPHA)
-    return get_stress_range_multi(start=garch.sample_start, end=garch.sample_end,
-                                  ndays=STRESS_WINDOW_DAYS, returns=returns,
-                                  weights=garch.weights, alpha=STRESS_ALPHA)
-
-
 def run_garch_var(
     config: Config | str | os.PathLike | None = None,
     data: Any = None,
@@ -164,16 +140,9 @@ def run_garch_var(
     """GARCH simulation VaR for every factor, liquidation period, sample window and
     starting-value quantile in the config.
 
-    For each combination, the configured ``var_type`` values run in this order:
-
-    * ``long_term``: ``custom_normal`` shocks
-    * ``normal``: ``normal`` shocks
-    * ``short_term``: ``custom_bootstrap`` from the last six months of the sample
-    * ``stress_var``: ``custom_bootstrap`` from the most volatile 126-day window
-
-    Starting values come from the last twelve months of the sample at each configured
-    quantile. Windows whose prices don't cover the sample are skipped and reported in
-    ``qa``.
+    Simulations use ``custom_normal`` shocks and starting values from the last twelve
+    months of the sample at each configured quantile. Windows with incomplete sample
+    coverage are skipped and reported in ``qa``.
 
     Args:
         config: config (path or :class:`Config`); defaults to the active config. Use
@@ -190,7 +159,6 @@ def run_garch_var(
     qa: list[dict[str, Any]] = []
     for factor in cfg.factors.values():
         models: dict[int, GarchSim] = {}  # fitted once per sample window, then reused
-        stress: dict[int, list[str]] = {}
         for nday in factor.ndays:
             horizon2 = g.horizon2 + nday - 1
             for idx, (forecast_start, forecast_end) in enumerate(forecast_range):
@@ -213,32 +181,16 @@ def run_garch_var(
                         pd.to_datetime(sample_end) - pd.offsets.MonthBegin(12)
                     ).strftime("%Y-%m-%d")
                     start_vals = [start_point_date, start_point_quantile]
-                    for var_type, (shock_type, label) in VAR_TYPES.items():
-                        if var_type not in g.var_type:
-                            continue
-                        boot: dict[str, str] = {}
-                        if var_type == "short_term":
-                            boot = {
-                                "bootstrap_start": (
-                                    pd.to_datetime(sample_end) - pd.offsets.MonthBegin(6)
-                                ).strftime("%Y-%m-%d"),
-                                "bootstrap_end": sample_end,
-                            }
-                        elif var_type == "stress_var":
-                            if idx not in stress:
-                                stress[idx] = _stress_window(garch)
-                            boot = {"bootstrap_start": stress[idx][0],
-                                    "bootstrap_end": stress[idx][1]}
-                        result = garch.simulate(
-                            horizon1=g.horizon1, horizon2=horizon2, ndays=nday, nsims=g.nsims,
-                            shock_type=shock_type, start_vals=start_vals, **boot,
-                        ).with_metadata(
-                            Volatility_Factor_ID=factor.volatility_factor_id,
-                            ForecastStart=forecast_start,
-                            ForecastEnd=forecast_end,
-                            Method=f"{label}_{round(start_point_quantile * 100)}",
-                        )
-                        records.append(result.to_dict())
+                    result = garch.simulate(
+                        horizon1=g.horizon1, horizon2=horizon2, ndays=nday, nsims=g.nsims,
+                        shock_type="custom_normal", start_vals=start_vals,
+                    ).with_metadata(
+                        Volatility_Factor_ID=factor.volatility_factor_id,
+                        ForecastStart=forecast_start,
+                        ForecastEnd=forecast_end,
+                        Method=f"long_term_var_{round(start_point_quantile * 100)}",
+                    )
+                    records.append(result.to_dict())
 
                     if verbose:
                         print(f"{factor.ticker_list}: n-days: {nday} | starting quantile: "

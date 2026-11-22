@@ -1,4 +1,4 @@
-"""Quarterly performance monitoring: F-tests, exception counts and shortfalls.
+"""Quarterly performance monitoring: F-tests, drawdowns, exceptions and shortfalls.
 
 Each report function returns a DataFrame laid out for saving to Excel. Windows are
 described by :class:`MonitoringPeriods` (the full sample, its last year, and the quarters
@@ -157,6 +157,89 @@ def f_test_report(
         df.columns = [str(qtr) + col if col != "ID" else col for col in df.columns]
         frames.append(df.set_index("ID"))
     return pd.concat(frames, axis=1)
+
+
+# --------------------------------------------------------------------------- #
+# Drawdown
+# --------------------------------------------------------------------------- #
+def drawdown_report(
+    periods: MonitoringPeriods,
+    quarters: Iterable[int] = (1, 2, 3),
+    *,
+    config: Any = None,
+    data: Any = None,
+) -> pd.DataFrame:
+    """Report the worst observed 10-day log return for each factor and quarter.
+
+    The report includes factors configured with a 10-day liquidation horizon and uses
+    their configured weights. Each return belongs to the quarter of its end date.
+
+    Args:
+        periods: sample and monitoring windows.
+        quarters: 1-based quarter numbers to include.
+        config: factor configuration. Defaults to the active config.
+        data: pricing data. Defaults to the configured source.
+
+    Returns:
+        One row per factor and quarter, ordered by quarter and descending drawdown.
+        Log returns and log losses are decimals. The arithmetic drawdown is a positive
+        loss in percent, floored at zero. Quarters without usable returns have zero
+        observations and blank loss measures and dates.
+    """
+    quarter_windows = dict(enumerate(periods.quarters, start=1))
+    quarters = tuple(quarters)
+    for quarter in quarters:
+        if quarter not in quarter_windows:
+            raise ValueError(f"Quarter {quarter} is not defined in the monitoring periods")
+
+    cfg = get_config(config)
+    data = get_data(data, cfg)
+    ndays = 10
+    columns = [
+        "Volatility_Factor_ID", "Tickers", "Weights", "Quarter", "Monitoring Start", "Monitoring End",
+        "NDays", "Observations", "Worst 10-Day Log Return", "Realized 10-Day Log Loss",
+        "Worst 10-Day Arithmetic Drawdown", "Drawdown Start", "Drawdown End",
+    ]
+    rows = []
+    for factor in cfg.factors.values():
+        if ndays not in factor.ndays:
+            continue
+        backtest = VarBacktest(factor.ticker_list, ndays, weights=factor.weight_list, data=data)
+        returns = backtest.nday_log_return
+        price_dates = backtest.log_price_matrix.index.sort_values()
+        for quarter in quarters:
+            start, end = quarter_windows[quarter]
+            observations = returns.loc[start:end]
+            worst_log_return = realized_log_loss = arithmetic_drawdown = np.nan
+            drawdown_start = drawdown_end = None
+            if not observations.empty:
+                end_date = observations.idxmin()
+                start_date = price_dates[price_dates.get_loc(end_date) - ndays]
+                worst_log_return = float(observations.loc[end_date])
+                realized_log_loss = max(0.0, -worst_log_return)
+                arithmetic_drawdown = 100 * (1 - np.exp(-realized_log_loss))
+                drawdown_start = start_date.strftime("%Y-%m-%d")
+                drawdown_end = end_date.strftime("%Y-%m-%d")
+
+            rows.append({
+                "Volatility_Factor_ID": factor.volatility_factor_id,
+                "Tickers": "; ".join(factor.tickers),
+                "Weights": None if factor.weights is None else "; ".join(map(str, factor.weights)),
+                "Quarter": quarter,
+                "Monitoring Start": start,
+                "Monitoring End": end,
+                "NDays": ndays,
+                "Observations": len(observations),
+                "Worst 10-Day Log Return": worst_log_return,
+                "Realized 10-Day Log Loss": realized_log_loss,
+                "Worst 10-Day Arithmetic Drawdown": arithmetic_drawdown,
+                "Drawdown Start": drawdown_start,
+                "Drawdown End": drawdown_end,
+            })
+
+    return pd.DataFrame.from_records(rows, columns=columns).sort_values(
+        ["Quarter", "Worst 10-Day Arithmetic Drawdown"], ascending=[True, False], ignore_index=True,
+    )
 
 
 # --------------------------------------------------------------------------- #

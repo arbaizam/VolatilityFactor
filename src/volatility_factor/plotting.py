@@ -22,21 +22,27 @@ if TYPE_CHECKING:
     from volatility_factor.garch import GarchSim
     from volatility_factor.results import VaRResult
 
-# Brand colours used across the charts.
+# FHLBank Topeka brand colours. Red shades mark losses and exceptions.
 COLORS = {
-    "primary": "#003359",  # single-series lines, VaR threshold
-    "positive": "#93B1CC",  # positive returns
-    "negative": "#DA9694",  # negative returns that are not breaks
-    "break": "#D62728",  # VaR breaks
-    "break_line": "rgba(128,128,128,0.25)",
-    "average_1": "#D62728",
-    "average_2": "#D86DCD",
-    "grid": "#E6E6E6",
-    "axis": "#BDBDBD",
-    "text": "#333333",
+    "primary": "#003359",
+    "light_blue": "#93B1CC",
+    "olive": "#AAAD00",
+    "dark_olive": "#8A8D32",
+    "teal": "#058AA8",
+    "blue": "#006699",
+    "steel_blue": "#7D9BC0",
+    "gray": "#808080",
+    "white": "#FFFFFF",
+    "text": "#0E2640",
+    "grid": "rgba(128,128,128,0.20)",
+    "axis": "rgba(128,128,128,0.60)",
+    "negative": "#DA9694",
+    "break": "#D62728",
+    "break_line": "rgba(214,39,40,0.20)",
 }
-# Fixed-order categorical palette for multi-ticker charts (colour-blind checked).
-SERIES_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300")
+SERIES_COLORS = tuple(
+    COLORS[name] for name in ("primary", "teal", "dark_olive", "blue", "steel_blue", "gray")
+)
 
 LINE_WIDTH = 2
 MARKER_SIZE = 8
@@ -79,10 +85,15 @@ def _style(
     """
     fig.update_layout(
         template="plotly_white",
-        title={"text": _wrap_title(title), "x": 0.0, "xanchor": "left"},
+        colorway=SERIES_COLORS,
+        paper_bgcolor=COLORS["white"],
+        plot_bgcolor=COLORS["white"],
+        title={"text": _wrap_title(title), "x": 0.0, "xanchor": "left",
+               "font": {"color": COLORS["primary"]}},
         height=DEFAULT_HEIGHT,
         hovermode=hovermode,
         font={"color": COLORS["text"]},
+        hoverlabel={"bgcolor": COLORS["white"], "bordercolor": COLORS["light_blue"]},
         legend={"orientation": "h", "yanchor": "top", "y": -0.08, "xanchor": "left", "x": 0.0},
         margin={"l": 70, "r": 30, "t": 90, "b": 80},
     )
@@ -117,26 +128,27 @@ def backtest_plot(
 ) -> go.Figure:
     """N-day returns against the VaR threshold.
 
-    Light blue = positive return, light red = negative return within VaR, red ``x`` =
+    Light blue = non-negative return, light red = negative return within VaR, red ``x`` =
     break (with a faint vertical guide), dashed navy = VaR.
     """
     r = bt.nday_price_return
     q = pd.Series(data=-bt.var_pct, index=r.index)
-    breaks = r[r <= q]
-    positive = r[r > 0]
-    negative = r[(q <= r) & (r <= 0)]
+    is_break = bt.break_series.astype(bool)
+    breaks = r[is_break]
+    positive = r[~is_break & r.ge(0)]
+    negative = r[~is_break & r.lt(0)]
 
     def dots(s: pd.Series, name: str, color: str, symbol: str = "circle") -> go.Scatter:
         """Marker trace for one group of returns."""
         return go.Scatter(
             x=s.index, y=s.values, name=name, mode="markers",
             marker={"color": color, "size": MARKER_SIZE, "symbol": symbol,
-                    "line": {"color": "white", "width": 1 if symbol == "circle" else 0}},
+                    "line": {"color": COLORS["white"], "width": 1 if symbol == "circle" else 0}},
             hovertemplate="%{x|%Y-%m-%d}<br>%{y:.2%}<extra>" + name + "</extra>",
         )
 
     fig = go.Figure()
-    fig.add_trace(dots(positive, "Positive return", COLORS["positive"]))
+    fig.add_trace(dots(positive, "Non-negative return", COLORS["light_blue"]))
     fig.add_trace(dots(negative, "Negative return", COLORS["negative"]))
     fig.add_trace(dots(breaks, f"Break ({len(breaks)})", COLORS["break"], symbol="x"))
     fig.add_trace(_line(q.index, q.values, f"VaR ({bt.var_pct:.2%})", COLORS["primary"],
@@ -227,7 +239,7 @@ def rolling_volatility_plot(
     vol = vd.rolling_volatility(window=window, periods_per_year=periods_per_year)
     fig = go.Figure()
     fig.add_trace(_line(vol.index, vol.values, "Annualized volatility", COLORS["primary"]))
-    avg_colors = [COLORS["average_1"], COLORS["average_2"], *SERIES_COLORS]
+    avg_colors = (COLORS["teal"], COLORS["olive"], *SERIES_COLORS[3:])
     for i, (label, (a, b)) in enumerate((averages or {}).items()):
         level = vol.loc[a:b].mean()
         fig.add_trace(_line(vol.index, np.full(len(vol), level), f"{label} ({level:.1%})",
@@ -270,7 +282,7 @@ def var_distribution_plot(result: VaRResult, bins: int = 60) -> go.Figure:
     per_path = -(np.exp(result.var_by_path / 100) - 1)  # arithmetic, positive = loss
     fig = go.Figure(go.Histogram(
         x=per_path.values, nbinsx=bins, name="Per-path VaR",
-        marker={"color": COLORS["positive"], "line": {"color": "white", "width": 2}},
+        marker={"color": COLORS["light_blue"], "line": {"color": COLORS["white"], "width": 2}},
         hovertemplate="VaR %{x:.2%}<br>%{y} paths<extra></extra>",
     ))
     for i, level in enumerate((0.50, 0.75, 0.95, 0.99)):
@@ -329,7 +341,7 @@ def observation_heatmap(
         zmin, zmax = 0, float(np.nanmax(z.values)) if z.size else 1
     fig = go.Figure(go.Heatmap(
         x=z.columns, y=z.index, z=z.values, zmin=zmin, zmax=zmax,
-        colorscale=[[0.0, COLORS["primary"]], [1.0, "#EEF3F8"]], colorbar=colorbar,
+        colorscale=[[0.0, COLORS["primary"]], [1.0, COLORS["light_blue"]]], colorbar=colorbar,
         hovertemplate=hover, xgap=1, ygap=1,
     ))
     fig = _style(fig, title or "Price observations by index", "", hovermode="closest")

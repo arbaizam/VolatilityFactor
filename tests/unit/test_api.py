@@ -36,7 +36,7 @@ def test_config_parsing(config):
     f = config.factor("three_way")
     assert f.tickers == ("G1P0", "G2P0", "CMOS") and f.weights == (0.5, 0.3, 0.2)
     assert config.factor("G1P0").weights is None  # YAML "None" string
-    assert config.garch.var_type == ("long_term", "normal", "short_term", "stress_var")
+    assert config.garch.start_point_quantiles == (0.50, 0.95)
     assert config.pricing_data_path.name == "pricing_sample.csv"
     assert config.find_factor_id(["CMOS"]) == "agy_cmo"
     assert config.find_factor_id(["XXXX"]) is None
@@ -288,6 +288,54 @@ def test_monitoring_periods_from_config(config):
     assert p.full == ("2016-01-01", "2024-12-31") and len(p.quarters) == 2
 
 
+def test_drawdown_report():
+    """Check weighted losses, quarter boundaries, and factors without observations."""
+    dates = pd.bdate_range("2024-12-17", "2025-01-03").difference(
+        pd.DatetimeIndex(["2024-12-25", "2025-01-01"])
+    )
+    prices = pd.concat([
+        pd.DataFrame({
+            "Date": dates, "Ticker": ticker, "Source": "fixture", "Description": ticker,
+            "Price": [100] * (len(dates) - 2) + final_prices,
+        })
+        for ticker, final_prices in {"A": [80, 90], "B": [90, 95], "C": [105, 110]}.items()
+    ])
+    cfg = Config.from_dict({"var_settings": {
+        "gain": {"tickers": ["C"], "ndays": [10]},
+        "portfolio": {"tickers": ["A", "B"], "weights": [0.75, 0.25], "ndays": [10, 252]},
+        "annual": {"tickers": ["B"], "ndays": [252]},
+    }})
+    periods = MonitoringPeriods.from_sample_end("2024-12-31", n_quarters=2)
+    result = vf.monitoring.drawdown_report(periods, quarters=[2, 1], config=cfg, data=prices)
+    assert list(result["Quarter"]) == [1, 1, 2, 2]
+    assert set(result["Volatility_Factor_ID"]) == {"portfolio", "gain"}
+
+    loss, gain = result.iloc[0], result.iloc[1]
+    expected_log_return = 0.75 * math.log(0.8) + 0.25 * math.log(0.9)
+    expected_drawdown = 100 * (1 - math.exp(expected_log_return))
+    assert loss["Volatility_Factor_ID"] == "portfolio"
+    assert loss["Tickers"] == "A; B" and loss["Weights"] == "0.75; 0.25"
+    assert loss["Observations"] == 2 and loss["NDays"] == 10
+    assert loss["Drawdown Start"] == "2024-12-17"
+    assert loss["Drawdown End"] == "2025-01-02"
+    assert loss["Worst 10-Day Log Return"] == pytest.approx(expected_log_return)
+    assert loss["Realized 10-Day Log Loss"] == pytest.approx(-expected_log_return)
+    assert loss["Worst 10-Day Arithmetic Drawdown"] == pytest.approx(expected_drawdown)
+    assert gain["Worst 10-Day Log Return"] == pytest.approx(math.log(1.05))
+    assert gain["Worst 10-Day Arithmetic Drawdown"] == gain["Realized 10-Day Log Loss"] == 0
+    assert gain["Weights"] is None
+
+    unavailable = result[result["Quarter"] == 2]
+    assert (unavailable["Observations"] == 0).all()
+    assert unavailable.loc[:, "Worst 10-Day Log Return":].isna().all().all()
+    empty = vf.monitoring.drawdown_report(
+        periods, quarters=[1], config=cfg.with_factors("annual"), data=prices,
+    )
+    assert empty.empty and list(empty) == list(result)
+    with pytest.raises(ValueError, match="Quarter 0"):
+        vf.monitoring.drawdown_report(periods, quarters=[0], config=cfg, data=prices)
+
+
 # ---------------------------------------------------------------------- plots
 def test_plots_return_figures():
     """Every chart function returns a Plotly figure with the expected traces."""
@@ -309,10 +357,27 @@ def test_plots_return_figures():
     figs.append(garch.simulate(63, 261, 10, "normal", nsims=200).plot_distribution())
     for fig in figs:
         assert isinstance(fig, go.Figure) and len(fig.data) >= 1
+        assert fig.layout.title.font.color == "#003359"
+        assert fig.layout.plot_bgcolor == "#FFFFFF"
     backtest = figs[0]
-    assert {t.name.split(" (")[0] for t in backtest.data} >= {"Positive return", "Break", "VaR"}
+    assert {t.name.split(" (")[0] for t in backtest.data} >= {"Non-negative return", "Break", "VaR"}
     assert "Backtesting Results" in backtest.layout.title.text
-    assert len(figs[2].data) == 2  # one line per index
+    assert [t.line.color for t in figs[2].data] == ["#003359", "#058AA8"]
+    assert [t.line.color for t in figs[5].data] == ["#003359", "#058AA8", "#AAAD00"]
+
+
+def test_backtest_plot_loss_colors():
+    """Highlight breaks in red and keep an exact-threshold loss in the negative series."""
+    prices = pd.DataFrame({
+        "Date": pd.bdate_range("2025-01-06", periods=4),
+        "Ticker": "A", "Source": "fixture", "Description": "Index A", "Price": [100, 75, 90, 45],
+    })
+    bt = VarBacktest("A", 1, var=25.0, var_is_log=False, data=prices, volatility_factor_id="A")
+    positive, negative, breaks, _ = bt.backtest_plot().data
+    assert [t.marker.color for t in (positive, negative, breaks)] == ["#93B1CC", "#DA9694", "#D62728"]
+    assert list(negative.y) == [-0.25]
+    assert list(breaks.y) == [-0.5]
+    assert breaks.marker.symbol == "x"
 
 
 def test_public_api_exports():
