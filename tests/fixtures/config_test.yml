@@ -1,0 +1,36 @@
+---
+# Test configuration: same schema as configs/var_config_volfactor.yml, smaller run sizes.
+data_settings:
+  pricing_data: pricing_sample.csv
+  loc_output: output
+  output_filename: combined_vars_test.xlsx
+
+garch_settings:
+  last_sample_date: "2024-12-31"
+  horizon1: 63
+  horizon2: 252
+  nsims: 2000
+  number_of_periods: 3
+  sample_years: 9
+  forecast_months: 12
+  forecast_lag: 3
+  var_type: [long_term, normal, short_term, stress_var]
+  start_point_quantiles: [0.50, 0.95]
+
+var_settings:
+  G1P0:
+    tickers: [G1P0]
+    ndays: [10, 252]
+    weights: None
+  G6P0[50];G9P0[50]:
+    tickers: [G6P0, G9P0]
+    ndays: [10]
+    weights: [.50, .50]
+  agy_cmo:
+    tickers: [CMOS]
+    ndays: [10]
+    weights: None
+  three_way:
+    tickers: [G1P0, G2P0, CMOS]
+    ndays: [10]
+    weights: [.5, .3, .2]
