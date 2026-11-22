@@ -13,7 +13,7 @@ from arch import arch_model
 from arch.univariate.base import ARCHModelResult
 
 from volatility_factor._kernels import nday_price_sim
-from volatility_factor._utils import deprecated_alias, validate_date
+from volatility_factor._utils import validate_date
 from volatility_factor.data import VarData
 from volatility_factor.results import VaRResult
 
@@ -22,8 +22,6 @@ if TYPE_CHECKING:
 
 SHOCK_TYPES = ("normal", "custom_normal", "bootstrap", "custom_bootstrap")
 Y_SCALES = (1000, 10000, 100, 10)  # tried in this order until the optimiser converges
-
-__all__ = ["SHOCK_TYPES", "GarchFit", "GarchSim"]
 
 
 @dataclass(frozen=True)
@@ -47,15 +45,18 @@ class GarchFit:
     attempts: tuple[tuple[int, int], ...]
 
     def __getattr__(self, name: str) -> Any:
+        """Look up any other attribute on the ``arch`` result."""
         if name in {"result", "__setstate__", "__getstate__"}:
             raise AttributeError(name)
         return getattr(self.result, name)
 
     def __dir__(self) -> list[str]:
+        """Own attributes plus those of the ``arch`` result (for tab completion)."""
         return sorted(set(super().__dir__()) | set(dir(self.result)))
 
     @property
     def convergence_code(self) -> int:
+        """Optimiser convergence flag of the final fit (0 = converged)."""
         return int(self.result.convergence_flag)
 
     @property
@@ -70,6 +71,7 @@ class GarchFit:
         return self.result.params["mu"] if self.result.num_params == 4 else 0
 
     def __repr__(self) -> str:
+        """Ticker, scale, convergence code and parameters."""
         return (
             f"GarchFit(ticker={self.ticker!r}, yscale={self.yscale}, "
             f"convergence_code={self.convergence_code}, params={dict(self.result.params)})"
@@ -124,6 +126,7 @@ class GarchSim(VarData):
         random_seed: int = 1,
         **kwargs: Any,
     ):
+        """Set up the model; fitting happens on first use. See the class docstring."""
         super().__init__(tickers, weights, **kwargs)
         self.sample_start = sample_start
         self.sample_end = sample_end
@@ -134,24 +137,29 @@ class GarchSim(VarData):
 
     # --------------------------------------------------------------- settings
     def _reset_fit(self) -> None:
+        """Drop the fitted models and everything derived from them."""
         for name in self._FIT_CACHE:
             self.__dict__.pop(name, None)
 
     @property
     def sample_start(self) -> str:
+        """First date of the training window (``YYYY-MM-DD``)."""
         return self._sample_start
 
     @sample_start.setter
     def sample_start(self, value: str) -> None:
+        """Validate and set the window start, clearing any fit."""
         self._sample_start = validate_date(value, "sample_start")
         self._reset_fit()
 
     @property
     def sample_end(self) -> str:
+        """Last date of the training window (``YYYY-MM-DD``)."""
         return self._sample_end
 
     @sample_end.setter
     def sample_end(self, value: str) -> None:
+        """Validate and set the window end, clearing any fit."""
         self._sample_end = validate_date(value, "sample_end")
         self._reset_fit()
 
@@ -198,6 +206,11 @@ class GarchSim(VarData):
         return fits
 
     def _fit_frame(self, getter) -> pd.DataFrame:
+        """One column per ticker built from each fit, on the training-data index.
+
+        Args:
+            getter: function from a :class:`GarchFit` to an array of training-length values.
+        """
         return pd.DataFrame(
             {col: getter(fit) for col, fit in self.fits.items()},
             index=self.training_data.index,
@@ -211,14 +224,17 @@ class GarchSim(VarData):
 
     @cached_property
     def residuals(self) -> pd.DataFrame:
+        """Fitted residuals (on the scaled returns), one column per ticker."""
         return self._fit_frame(lambda f: f.result.resid.values)
 
     @cached_property
     def std_residuals(self) -> pd.DataFrame:
+        """Standardized residuals, one column per ticker."""
         return self._fit_frame(lambda f: f.result.std_resid.values)
 
     @cached_property
     def conditional_vol(self) -> pd.DataFrame:
+        """Fitted conditional volatility (on the scaled returns), one column per ticker."""
         return self._fit_frame(lambda f: f.result.conditional_volatility.values)
 
     @cached_property
@@ -233,18 +249,22 @@ class GarchSim(VarData):
 
     @property
     def yscale(self) -> list[int]:
+        """Scale applied to each ticker's returns before fitting."""
         return [f.yscale for f in self.fits.values()]
 
     @property
     def convergence_codes(self) -> list[int]:
+        """Convergence flag of each ticker's final fit (0 = converged)."""
         return [f.convergence_code for f in self.fits.values()]
 
     @property
     def coefficients(self) -> list[list[float]]:
+        """``[omega, alpha, beta]`` for each ticker."""
         return [f.coefficients for f in self.fits.values()]
 
     @property
     def constant_mean(self) -> list[float]:
+        """Constant mean for each ticker (0 for the zero-mean model)."""
         return [f.constant_mean for f in self.fits.values()]
 
     def summary(self) -> pd.DataFrame:
@@ -382,6 +402,11 @@ class GarchSim(VarData):
         bootstrap_start: str | None,
         bootstrap_end: str | None,
     ) -> np.ndarray:
+        """Generate the shock array for ``shock_type``.
+
+        Raises:
+            ValueError: for an unknown shock type, or a bootstrap type without its window.
+        """
         horizon = horizon1 + horizon2
         if shock_type in ("bootstrap", "custom_bootstrap") and (
             bootstrap_start is None or bootstrap_end is None
@@ -492,9 +517,21 @@ class GarchSim(VarData):
         bootstrap_start: str | None,
         bootstrap_end: str | None,
     ) -> dict[str, Any]:
+        """Build the result dict for one simulation.
+
+        Args:
+            var: per-path VaR quantiles (log percent).
+            horizon1, horizon2, ndays, shock_type, nsims, var_p, start_vals,
+                bootstrap_start, bootstrap_end: the simulation settings, recorded as-is.
+
+        Returns:
+            Dict of settings, convergence codes, and log and arithmetic VaR at the 50th,
+            75th, 95th and 99th percentiles across paths.
+        """
         is_boot = shock_type in ["bootstrap", "custom_bootstrap"]
 
         def q(level: float) -> float:
+            """Quantile of the per-path VaR at ``level`` (the left tail)."""
             return var.quantile(1 - level, interpolation="higher")
 
         return {
@@ -531,28 +568,6 @@ class GarchSim(VarData):
             "VaR_95": round(-(np.exp(q(0.95) / 100) - 1) * 100, 4),
             "VaR_99": round(-(np.exp(q(0.99) / 100) - 1) * 100, 4),
         }
-
-    def custom_nday_price_simulation(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        """Same as :meth:`simulate` but returns the plain result dict."""
-        return self.simulate(*args, **kwargs).to_dict()
-
-    @deprecated_alias("simulate")
-    def CustomNDayPriceSimulation(  # noqa: N802 - legacy name
-        self,
-        horizon1: int,
-        horizon2: int,
-        ndays: int,
-        shock_type: str,
-        nsims: int,
-        VaRp: float = 0.99,  # noqa: N803
-        start_vals: Sequence | None = None,
-        bootstrap_start: str | None = None,
-        bootstrap_end: str | None = None,
-    ) -> dict[str, Any]:
-        return self.custom_nday_price_simulation(
-            horizon1, horizon2, ndays, shock_type, nsims, var_p=VaRp, start_vals=start_vals,
-            bootstrap_start=bootstrap_start, bootstrap_end=bootstrap_end,
-        )
 
     # ------------------------------------------------------------------ plotting
     def plot_fit(self, ticker: str | None = None, **kwargs: Any) -> go.Figure:

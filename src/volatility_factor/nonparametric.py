@@ -8,10 +8,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from volatility_factor._utils import deprecated_alias, validate_date
+from volatility_factor._utils import validate_date
 from volatility_factor.data import VarData
-
-__all__ = ["NonParametricVar"]
 
 
 class NonParametricVar(VarData):
@@ -31,24 +29,35 @@ class NonParametricVar(VarData):
         sample_end: str,
         **kwargs: Any,
     ):
+        """Set up the model.
+
+        Args:
+            tickers, weights: see :class:`~volatility_factor.data.VarData`.
+            sample_start, sample_end: sample window (``YYYY-MM-DD``).
+            **kwargs: ``data``, ``config`` or ``volatility_factor_id``.
+        """
         super().__init__(tickers, weights, **kwargs)
         self.sample_start = sample_start
         self.sample_end = sample_end
 
     @property
     def sample_start(self) -> str:
+        """First date of the sample window (``YYYY-MM-DD``)."""
         return self._sample_start
 
     @sample_start.setter
     def sample_start(self, value: str) -> None:
+        """Validate and set the window start."""
         self._sample_start = validate_date(value, "sample_start")
 
     @property
     def sample_end(self) -> str:
+        """Last date of the sample window (``YYYY-MM-DD``)."""
         return self._sample_end
 
     @sample_end.setter
     def sample_end(self, value: str) -> None:
+        """Validate and set the window end."""
         self._sample_end = validate_date(value, "sample_end")
 
     def with_sample(self, sample_start: str, sample_end: str) -> NonParametricVar:
@@ -120,9 +129,3 @@ class NonParametricVar(VarData):
             "BootstrapReplications": nboot,
             "VaR": quantile_boot_mean,
         }
-
-    @deprecated_alias("circular_block_bootstrap")
-    def CircularBlockBootstrap(  # noqa: N802 - legacy name
-        self, n_liquidation: int, nboot: int = 1000, VaRp: float = 0.99  # noqa: N803
-    ) -> dict[str, Any]:
-        return self.circular_block_bootstrap(n_liquidation, nboot=nboot, var_p=VaRp)

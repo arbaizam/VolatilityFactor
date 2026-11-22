@@ -24,15 +24,6 @@ import yaml
 CONFIG_ENV_VAR = "VOLFACTOR_CONFIG"
 DEFAULT_CONFIG_RELPATH = Path("configs") / "var_config_volfactor.yml"
 
-__all__ = [
-    "Config",
-    "FactorConfig",
-    "GarchSettings",
-    "get_config",
-    "set_config",
-    "use_config",
-]
-
 
 def _normalize_weights(value: Any) -> tuple[float, ...] | None:
     """YAML weights are either a list or the literal ``None`` / ``"None"``."""
@@ -52,6 +43,12 @@ class FactorConfig:
 
     @classmethod
     def from_dict(cls, volatility_factor_id: str, values: Mapping[str, Any]) -> FactorConfig:
+        """Build from one ``var_settings`` entry.
+
+        Args:
+            volatility_factor_id: the entry's key.
+            values: the entry (``tickers``, ``ndays`` and optional ``weights``).
+        """
         return cls(
             volatility_factor_id=str(volatility_factor_id),
             tickers=tuple(values["tickers"]),
@@ -61,10 +58,12 @@ class FactorConfig:
 
     @property
     def ticker_list(self) -> list[str]:
+        """Tickers as a list."""
         return list(self.tickers)
 
     @property
     def weight_list(self) -> list[float] | None:
+        """Weights as a list, or ``None`` for equal weights."""
         return None if self.weights is None else list(self.weights)
 
 
@@ -85,6 +84,11 @@ class GarchSettings:
 
     @classmethod
     def from_dict(cls, values: Mapping[str, Any]) -> GarchSettings:
+        """Build from the ``garch_settings`` section.
+
+        Args:
+            values: the section as a mapping.
+        """
         return cls(
             last_sample_date=str(values["last_sample_date"]),
             horizon1=int(values["horizon1"]),
@@ -150,24 +154,36 @@ class Config:
     # ----------------------------------------------------------------- sections
     @property
     def base_dir(self) -> Path:
+        """Directory that relative paths in the config are resolved against."""
         return self.path.parent if self.path is not None else Path.cwd()
 
     @property
     def data_settings(self) -> Mapping[str, Any]:
+        """The ``data_settings`` section (empty if absent)."""
         return self.raw.get("data_settings", {}) or {}
 
     @property
     def garch(self) -> GarchSettings:
+        """The ``garch_settings`` section, with any ``with_garch`` overrides applied."""
         return GarchSettings.from_dict({**self.raw.get("garch_settings", {}), **self._garch_overrides})
 
     @property
     def factors(self) -> dict[str, FactorConfig]:
+        """Configured factors keyed by ``volatility_factor_id``, in file order."""
         return {
             vf_id: FactorConfig.from_dict(vf_id, values)
             for vf_id, values in (self.raw.get("var_settings", {}) or {}).items()
         }
 
     def factor(self, volatility_factor_id: str) -> FactorConfig:
+        """One configured factor.
+
+        Args:
+            volatility_factor_id: key in ``var_settings``.
+
+        Raises:
+            KeyError: if the id is not configured (the message lists the known ids).
+        """
         try:
             return self.factors[volatility_factor_id]
         except KeyError:
@@ -177,7 +193,7 @@ class Config:
             ) from None
 
     def find_factor_id(self, tickers: Sequence[str]) -> str | None:
-        """Reverse lookup by tickers (order-sensitive; the last match wins, as before)."""
+        """The factor id configured for exactly these tickers (order matters; the last match wins)."""
         found = None
         for vf_id, factor in self.factors.items():
             if list(factor.tickers) == list(tickers):
@@ -185,16 +201,26 @@ class Config:
         return found
 
     def resolve_path(self, value: str | os.PathLike) -> Path:
+        """Resolve a path from the config file.
+
+        Args:
+            value: absolute path, or a path relative to the config file's directory.
+
+        Returns:
+            Absolute path.
+        """
         path = Path(value)
         return path if path.is_absolute() else (self.base_dir / path).resolve()
 
     @property
     def pricing_data_path(self) -> Path | None:
+        """``data_settings.pricing_data`` as an absolute path, or ``None``."""
         value = self.data_settings.get("pricing_data")
         return self.resolve_path(value) if value else None
 
     @property
     def output_dir(self) -> Path:
+        """``data_settings.loc_output`` as an absolute path (default ``output``)."""
         return self.resolve_path(self.data_settings.get("loc_output", "output"))
 
     @property
@@ -223,6 +249,14 @@ _active_config: Config | None = None
 
 
 def _discover_config_path() -> Path | None:
+    """Find the default config file.
+
+    Checks ``$VOLFACTOR_CONFIG``, then ``configs/var_config_volfactor.yml`` in the working
+    directory and each parent directory.
+
+    Returns:
+        The path, or ``None`` if none is found.
+    """
     env = os.environ.get(CONFIG_ENV_VAR)
     if env:
         return Path(env)
@@ -235,6 +269,7 @@ def _discover_config_path() -> Path | None:
 
 
 def _coerce_config(config: Config | str | os.PathLike | Mapping[str, Any]) -> Config:
+    """Turn a :class:`Config`, path or dict into a :class:`Config`."""
     if isinstance(config, Config):
         return config
     if isinstance(config, Mapping):
