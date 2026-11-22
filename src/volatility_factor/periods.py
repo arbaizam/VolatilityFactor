@@ -5,8 +5,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-__all__ = ["create_periods", "get_stress_range", "get_stress_range_multi", "get_stress_range_single"]
-
 
 def create_periods(
     last_sample_date: str,
@@ -115,6 +113,16 @@ def get_stress_range(
 
 
 def _select_stress_window(std: list, stress_range: list, alpha: float) -> list[str]:
+    """Pick the window whose volatility is at the ``alpha`` quantile.
+
+    Args:
+        std: volatility of each candidate window.
+        stress_range: ``[start, end]`` of each candidate window.
+        alpha: quantile to select (``higher`` interpolation).
+
+    Returns:
+        ``[start, end]`` as ``YYYY-MM-DD`` strings.
+    """
     std_ser = pd.Series(std)
     stdqq = std_ser.quantile(alpha, interpolation="higher")
     period_idx = std_ser[std_ser == stdqq].index.astype(int).to_list()[0]

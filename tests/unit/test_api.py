@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -29,6 +31,7 @@ SAMPLE = ("2016-01-01", "2024-12-31")
 
 # --------------------------------------------------------------------- config
 def test_config_parsing(config):
+    """Factors, weights, settings and paths are read from the config."""
     assert list(config.factors) == ["G1P0", "G6P0[50];G9P0[50]", "agy_cmo", "three_way"]
     f = config.factor("three_way")
     assert f.tickers == ("G1P0", "G2P0", "CMOS") and f.weights == (0.5, 0.3, 0.2)
@@ -40,6 +43,7 @@ def test_config_parsing(config):
 
 
 def test_config_chaining_is_immutable(config):
+    """with_garch/with_factors return copies and leave the original alone."""
     smaller = config.with_garch(nsims=10).with_factors("agy_cmo")
     assert smaller.garch.nsims == 10 and list(smaller.factors) == ["agy_cmo"]
     assert config.garch.nsims == 2000 and len(config.factors) == 4
@@ -48,6 +52,7 @@ def test_config_chaining_is_immutable(config):
 
 
 def test_config_periods(config):
+    """Config.periods() returns the expected latest windows."""
     samples, forecasts = config.periods()
     assert samples[0] == ["2016-01-01", "2024-12-31"]
     assert forecasts[0] == ["2025-04-01", "2026-03-31"]
@@ -55,6 +60,7 @@ def test_config_periods(config):
 
 # ----------------------------------------------------------------------- data
 def test_data_resolution_order(pricing, config, monkeypatch, tmp_path):
+    """Data comes from use_data, then the environment variable, then the config."""
     small = pricing.filter(tickers=["CMOS"])
     assert get_data() is pricing  # set by the autouse fixture
     with use_data(small):
@@ -73,6 +79,7 @@ def test_data_resolution_order(pricing, config, monkeypatch, tmp_path):
 
 
 def test_data_argument_forms(pricing):
+    """A DataFrame, a path and a PricingData give the same prices."""
     frame = pricing.filter(tickers=["M0A0"]).frame
     a = VarData("M0A0", data=frame).price_matrix
     b = VarData("M0A0", data=FIXTURE_CSV).price_matrix
@@ -82,11 +89,13 @@ def test_data_argument_forms(pricing):
 
 
 def test_missing_ticker_message(pricing):
+    """An unknown ticker raises a KeyError naming it."""
     with pytest.raises(KeyError, match="NOPE"):
         _ = VarData("NOPE").price_matrix
 
 
 def test_from_frame_handles_text_prices():
+    """Text prices with thousands separators are parsed."""
     df = pd.DataFrame({
         "Date": ["2024-01-02", "2024-01-03"], "Ticker": ["X", "X"], "Source": "s",
         "Description": "d", "Price": ["1,000.5", "1,001.5"],
@@ -98,6 +107,7 @@ def test_from_frame_handles_text_prices():
 
 # -------------------------------------------------------------------- VarData
 def test_weights_rules():
+    """Weight defaults and validation errors."""
     assert VarData("M0A0").weights.tolist() == 1
     assert VarData("M0A0", weights=2).weights.tolist() == 1  # ignored for one ticker
     assert VarData(["G6P0", "G9P0"]).weights.tolist() == [0.5, 0.5]
@@ -111,6 +121,7 @@ def test_weights_rules():
 
 
 def test_from_id_and_descriptions():
+    """from_id sets tickers, weights and id; descriptions are formatted."""
     v = VarData.from_id("three_way")
     assert v.tickers == ["G1P0", "G2P0", "CMOS"]
     assert v.weight_description == "0.5;0.3;0.2"
@@ -119,6 +130,7 @@ def test_from_id_and_descriptions():
 
 
 def test_changing_tickers_clears_cache():
+    """Changing tickers recomputes the price matrix."""
     v = VarData("M0A0")
     first = v.price_matrix
     v.tickers = "CMOS"
@@ -128,6 +140,7 @@ def test_changing_tickers_clears_cache():
 
 # ---------------------------------------------------------------- chaining
 def test_chaining_garch_shares_data_and_cache():
+    """VarData.garch() reuses the data and computed matrices."""
     base = VarData.from_id("G6P0[50];G9P0[50]")
     _ = base.price_matrix
     garch = base.garch(*SAMPLE)
@@ -138,6 +151,7 @@ def test_chaining_garch_shares_data_and_cache():
 
 
 def test_garch_fit_exposes_arch_result():
+    """GarchFit passes attributes through to the arch result."""
     garch = GarchSim.from_id("agy_cmo", sample_start=SAMPLE[0], sample_end=SAMPLE[1]).fit()
     fit = garch.fits["CMOS"]
     assert fit.aic == fit.result.aic  # delegated attribute
@@ -149,6 +163,7 @@ def test_garch_fit_exposes_arch_result():
 
 
 def test_changing_sample_refits():
+    """Changing the sample window refits the models."""
     garch = GarchSim("CMOS", None, *SAMPLE).fit()
     first = garch.fits["CMOS"]
     garch.with_sample("2015-01-01", "2023-12-31")
@@ -157,6 +172,7 @@ def test_changing_sample_refits():
 
 
 def test_simulate_result_object():
+    """VaRResult acts like a dict and keeps the simulated paths."""
     res = GarchSim("CMOS", None, *SAMPLE).simulate(63, 261, 10, "normal", nsims=200)
     assert res["VaR_99"] == res.var(0.99) == res.to_dict()["VaR_99"]
     assert res.sim_paths.shape == (200, 324)
@@ -167,6 +183,7 @@ def test_simulate_result_object():
 
 
 def test_simulate_validation():
+    """Bad shock types, missing bootstrap windows and bad dates raise."""
     garch = GarchSim("CMOS", None, *SAMPLE)
     with pytest.raises(ValueError, match="shock_type"):
         garch.simulate(63, 261, 10, "bogus", nsims=10)
@@ -177,6 +194,7 @@ def test_simulate_validation():
 
 
 def test_backtest_chaining_resets_results():
+    """with_var/with_window clear cached results."""
     bt = VarData("CMOS").backtest(10, var=2.0, start_date="2022-01-01", end_date="2022-12-31")
     breaks_2 = bt.exceptions
     assert bt.with_var(0.5).exceptions > breaks_2
@@ -185,11 +203,33 @@ def test_backtest_chaining_resets_results():
         _ = VarBacktest("CMOS", 10).var_pct
 
 
-def test_log_likelihood_accepts_lists():
-    assert log_likelihood_test([0, 0, 1, 0])["Exceptions"] == 1
+def test_log_likelihood_transition_statistics():
+    """Alternating outcomes have four transitions of each kind and no self-transitions."""
+    result = log_likelihood_test([1, 0] * 4 + [1], converge_rate=0.25)
+    fitted = 5 * math.log(5 / 9) + 4 * math.log(4 / 9)
+    null = 5 * math.log(0.25) + 4 * math.log(0.75)
+    assert result["Observations"] == 9
+    assert result["Exceptions"] == 5
+    assert result["LR_uc"] == round(2 * (fitted - null), 3)
+    assert result["LR_ind"] == round(16 * math.log(2), 3)
+    assert result["LR_cc"] == round(-8 * math.log(0.25 * 0.75), 3)
+    assert result["Independence"] == "RejectNull"
+
+
+@pytest.mark.parametrize("breaks", [[], [0] * 30, [1] * 30])
+def test_log_likelihood_with_no_variation(breaks):
+    """Coverage can use constant outcomes; a transition test requires both states."""
+    result = log_likelihood_test(breaks)
+    assert result["Observations"] == len(breaks)
+    assert result["Exceptions"] == sum(breaks)
+    assert math.isfinite(result["LR_uc"]) == bool(breaks)
+    assert math.isnan(result["LR_ind"])
+    assert math.isnan(result["LR_cc"])
+    assert result["Independence"] is None
 
 
 def test_run_backtests_pads_incomplete_window(pricing):
+    """Forecast windows past the last price are padded (or not)."""
     last = pricing.date_range("CMOS")[1]
     results = pd.DataFrame([{
         "Volatility_Factor_ID": "agy_cmo", "Tickers": "CMOS", "Weights": "1",
@@ -200,18 +240,57 @@ def test_run_backtests_pads_incomplete_window(pricing):
     detail = run.detail[run.detail["VaRQ"] == "99Q"]
     assert detail["Date"].max() == pd.Timestamp("2026-03-31")
     assert detail.loc[detail["Date"] > last, "Price"].isna().all()
-    assert len(run.independence) == 4 and set(run.independence["VaRQ"]) == {"50Q", "75Q", "95Q", "99Q"}
+    assert run.independence.set_index("VaRQ")["converge_rate"].to_dict() == {
+        "50Q": 50.0, "75Q": 25.0, "95Q": 5.0, "99Q": 1.0,
+    }
+    assert (run.independence["Observations"] == detail["Breaks"].notna().sum()).all()
     no_pad = run_backtests(results, pad_incomplete=False).detail
     assert no_pad["Date"].max() == last
 
 
+def test_run_backtests_with_no_observations():
+    """A forecast after the available prices has no statistics or independence decision."""
+    results = pd.DataFrame([{
+        "Volatility_Factor_ID": "agy_cmo", "Tickers": "CMOS", "Weights": "1",
+        "ForecastStart": "2030-01-01", "ForecastEnd": "2030-01-05", "Method": "m", "NDays": 10,
+        "VaR_50": 1.0, "VaR_75": 1.5, "VaR_95": 2.0, "VaR_99": 3.0,
+    }])
+    run = run_backtests(results, converge_rate=0.1)
+    assert (run.independence["Observations"] == 0).all()
+    assert (run.independence["converge_rate"] == 10.0).all()
+    assert run.independence[["LR_uc", "LR_ind", "LR_cc", "Independence"]].isna().all().all()
+    assert len(run.detail) == 20
+    assert run.detail["RejectNullIndependence"].isna().all()
+    assert run_backtests(results, pad_incomplete=False).detail.empty
+
+
+def test_garch_save_without_results(config, pricing, tmp_path):
+    """An entirely skipped run publishes QA and keeps the last successful results."""
+    cfg = config.with_factors("agy_cmo")
+    recent = pricing.filter(tickers=["CMOS"], start="2024-12-26", end="2024-12-31")
+    run = vf.run_garch_var(cfg, data=recent, verbose=False)
+    assert run.results.empty and not run.qa.empty
+    assert run.long.empty
+    assert run.backtest().detail.empty
+    path = tmp_path / "batch"
+    output = [path.with_suffix(".xlsx"), path.with_suffix(".parquet")]
+    for file in output:
+        file.write_bytes(b"previous results")
+    with pytest.raises(ValueError, match="No VaR results to publish"):
+        run.save(path)
+    assert all(file.read_bytes() == b"previous results" for file in output)
+    pd.testing.assert_frame_equal(pd.read_excel(tmp_path / "QA1_batch.xlsx"), run.qa)
+
+
 def test_monitoring_periods_from_config(config):
+    """MonitoringPeriods.from_config uses the config's sample end."""
     p = MonitoringPeriods.from_config(config, n_quarters=2)
     assert p.full == ("2016-01-01", "2024-12-31") and len(p.quarters) == 2
 
 
 # ---------------------------------------------------------------------- plots
 def test_plots_return_figures():
+    """Every chart function returns a Plotly figure with the expected traces."""
     bt = VarData.from_id("G6P0[50];G9P0[50]").backtest(
         10, var=1.0, start_date="2022-01-01", end_date="2023-12-31", var_is_log=False
     )
@@ -237,6 +316,7 @@ def test_plots_return_figures():
 
 
 def test_public_api_exports():
+    """Every name in __all__ exists."""
     for name in vf.__all__:
         assert hasattr(vf, name), name
     assert isinstance(Config.from_dict({"var_settings": {}}).factors, dict)

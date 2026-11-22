@@ -1,4 +1,4 @@
-"""Config-driven model runs (the loops from ``volatility_factor_main.ipynb``).
+"""Config-driven model runs: every configured factor, window and setting in one call.
 
 Typical use::
 
@@ -12,8 +12,10 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from volatility_factor.backtesting import BacktestRun, run_backtests
@@ -23,14 +25,6 @@ from volatility_factor.garch import GarchSim
 from volatility_factor.nonparametric import NonParametricVar
 from volatility_factor.periods import get_stress_range_multi, get_stress_range_single
 from volatility_factor.results import to_long
-
-__all__ = [
-    "VAR_TYPES",
-    "BootstrapRun",
-    "GarchRun",
-    "run_circular_bootstrap",
-    "run_garch_var",
-]
 
 #: ``garch_settings.var_type`` value -> (shock type, ``Method`` label prefix).
 #: They always run in this order.
@@ -45,6 +39,7 @@ STRESS_ALPHA = 0.99
 
 
 def _output_file(output_file: str | os.PathLike | None, config: Config) -> Path:
+    """The output file stem (given, or from the config), creating its folder."""
     path = Path(output_file) if output_file else config.output_file
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
@@ -72,11 +67,28 @@ class GarchRun:
         return to_long(self.results)
 
     def save(self, output_file: str | os.PathLike | None = None) -> GarchRun:
-        """Write ``<output_file>.xlsx``, ``<output_file>.parquet`` and ``QA1_<name>.xlsx``."""
+        """Write the Excel and parquet results and the sample-coverage workbook.
+
+        Raises:
+            ValueError: when there are no results. The QA workbook records the run.
+        """
         path = _output_file(output_file, self.config)
-        self.results.to_excel(f"{path}.xlsx", index=False)
-        self.long.to_parquet(f"{path}.parquet", compression="snappy")
-        self.qa.to_excel(path.parent / f"QA1_{path.name}.xlsx", index=False)
+        qa_file = path.parent / f"QA1_{path.name}.xlsx"
+        with TemporaryDirectory(dir=path.parent) as directory:
+            staged = Path(directory)
+            qa_stage = staged / qa_file.name
+            self.qa.to_excel(qa_stage, index=False)
+            if self.results.empty:
+                qa_stage.replace(qa_file)
+                raise ValueError(f"No VaR results to publish. Sample coverage report: {qa_file}")
+
+            excel_stage = staged / f"{path.name}.xlsx"
+            parquet_stage = staged / f"{path.name}.parquet"
+            self.results.to_excel(excel_stage, index=False)
+            self.long.to_parquet(parquet_stage, compression="snappy")
+            excel_stage.replace(path.parent / excel_stage.name)
+            parquet_stage.replace(path.parent / parquet_stage.name)
+            qa_stage.replace(qa_file)
         return self
 
     def backtest(self, **kwargs: Any) -> BacktestRun:
@@ -106,22 +118,33 @@ class BootstrapRun:
 def _coverage_failure(
     garch: GarchSim, factor: FactorConfig, sample_start: str, sample_end: str
 ) -> dict[str, str] | None:
-    """QA: prices must cover the sample window (allowing four days at each end)."""
-    first_price_date = garch.price_matrix.first_valid_index() - pd.offsets.Day(4)
-    last_price_date = garch.price_matrix.last_valid_index() + pd.offsets.Day(4)
-    if first_price_date > pd.to_datetime(sample_start) or last_price_date < pd.to_datetime(sample_end):
-        return {
-            "Volatility_Factor_ID": factor.volatility_factor_id,
-            "Tickers": garch.ticker_description,
-            "SampleStart": sample_start,
-            "SampleEnd": sample_end,
-            "FirstPriceDate": first_price_date.strftime("%Y-%m-%d"),
-            "LastPriceDate": last_price_date.strftime("%Y-%m-%d"),
-        }
-    return None
+    """Require aligned prices at the sample boundaries and usable returns in the sample."""
+    prices = garch.price_matrix
+    aligned = (np.isfinite(prices) & prices.gt(0)).all(axis=1) & prices.index.notna()
+    dates = prices.index[aligned]
+    allowance = pd.offsets.Day(4)
+    first_price_date = last_price_date = ""
+    if len(dates):
+        first = dates[0] - allowance
+        last = dates[-1] + allowance
+        start, end = pd.Timestamp(sample_start), pd.Timestamp(sample_end)
+        in_sample = (prices.index >= start) & (prices.index <= end)
+        has_returns = (aligned & aligned.shift(fill_value=False) & in_sample).any()
+        if first <= start and last >= end and has_returns:
+            return None
+        first_price_date, last_price_date = first.strftime("%Y-%m-%d"), last.strftime("%Y-%m-%d")
+    return {
+        "Volatility_Factor_ID": factor.volatility_factor_id,
+        "Tickers": garch.ticker_description,
+        "SampleStart": sample_start,
+        "SampleEnd": sample_end,
+        "FirstPriceDate": first_price_date,
+        "LastPriceDate": last_price_date,
+    }
 
 
 def _stress_window(garch: GarchSim) -> list[str]:
+    """The most volatile 126-day window in the model's sample (99th percentile)."""
     returns = garch.log_return_matrix[garch.sample_start : garch.sample_end].copy()
     if garch.single_index is True:
         return get_stress_range_single(start=garch.sample_start, end=garch.sample_end,

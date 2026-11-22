@@ -18,22 +18,11 @@ from plotly.subplots import make_subplots
 
 if TYPE_CHECKING:
     from volatility_factor.backtesting import VarBacktest
-    from volatility_factor.data import VarData
+    from volatility_factor.data import PricingData, VarData
     from volatility_factor.garch import GarchSim
     from volatility_factor.results import VaRResult
 
-__all__ = [
-    "COLORS",
-    "SERIES_COLORS",
-    "backtest_plot",
-    "garch_fit_plot",
-    "price_change_plot",
-    "price_plot",
-    "rolling_volatility_plot",
-    "var_distribution_plot",
-]
-
-# Brand colours carried over from the original matplotlib charts.
+# Brand colours used across the charts.
 COLORS = {
     "primary": "#003359",  # single-series lines, VaR threshold
     "positive": "#93B1CC",  # positive returns
@@ -55,6 +44,11 @@ DEFAULT_HEIGHT = 550
 
 
 def _series_color(i: int) -> str:
+    """Colour for the ``i``-th series.
+
+    Raises:
+        ValueError: if there are more series than palette colours.
+    """
     if i >= len(SERIES_COLORS):
         raise ValueError(
             f"More than {len(SERIES_COLORS)} series; plot the weighted series or split the chart."
@@ -70,6 +64,19 @@ def _style(
     x_range: tuple[Any, Any] | None = None,
     hovermode: str = "x unified",
 ) -> go.Figure:
+    """Apply the shared layout: title, axes, grid, legend and hover mode.
+
+    Args:
+        fig: figure to style.
+        title: chart title (long titles are split over two lines).
+        y_title: y-axis title.
+        y_format: y-axis tick format, e.g. ``".2%"``.
+        x_range: ``(start, end)`` for the x-axis; ``None`` values leave that end open.
+        hovermode: Plotly hover mode.
+
+    Returns:
+        The same figure.
+    """
     fig.update_layout(
         template="plotly_white",
         title={"text": _wrap_title(title), "x": 0.0, "xanchor": "left"},
@@ -97,6 +104,7 @@ def _wrap_title(title: str, width: int = 90) -> str:
 
 
 def _line(x, y, name: str, color: str, **kwargs: Any) -> go.Scatter:
+    """A 2px line trace."""
     return go.Scatter(x=x, y=y, name=name, mode="lines",
                       line={"color": color, "width": LINE_WIDTH}, **kwargs)
 
@@ -119,6 +127,7 @@ def backtest_plot(
     negative = r[(q <= r) & (r <= 0)]
 
     def dots(s: pd.Series, name: str, color: str, symbol: str = "circle") -> go.Scatter:
+        """Marker trace for one group of returns."""
         return go.Scatter(
             x=s.index, y=s.values, name=name, mode="markers",
             marker={"color": color, "size": MARKER_SIZE, "symbol": symbol,
@@ -278,3 +287,53 @@ def var_distribution_plot(result: VaRResult, bins: int = 60) -> go.Figure:
     return _style(fig, title, "Paths", hovermode="closest").update_xaxes(
         title_text="Per-path VaR", tickformat=".1%"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Data QA charts
+# --------------------------------------------------------------------------- #
+def observation_heatmap(
+    data: PricingData,
+    freq: str = "ME",
+    tickers: str | list[str] | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    normalize: bool = True,
+    title: str | None = None,
+) -> go.Figure:
+    """Heatmap of price observations by index and period, to spot incomplete pricing.
+
+    Args:
+        data: pricing data.
+        freq: period frequency (``"ME"`` month, ``"QE"`` quarter, ``"YE"`` year).
+        tickers: tickers to show; ``None`` for all.
+        start, end: date window (``YYYY-MM-DD``).
+        normalize: colour by coverage (observations / vendor dates in the period) rather
+            than raw counts. Full coverage is light; gaps are dark. Blank cells are periods
+            before an index's first price.
+        title: chart title.
+
+    Returns:
+        A Plotly heatmap figure (one row per ticker).
+    """
+    values = data.observation_counts(freq=freq, tickers=tickers, start=start, end=end,
+                                     normalize=normalize)
+    z = values.T
+    if normalize:
+        colorbar = {"title": "Coverage", "tickformat": ".0%"}
+        hover = "%{y}<br>%{x|%Y-%m}<br>Coverage %{z:.1%}<extra></extra>"
+        zmin, zmax = 0.0, 1.0
+    else:
+        colorbar = {"title": "Observations"}
+        hover = "%{y}<br>%{x|%Y-%m}<br>%{z} observations<extra></extra>"
+        zmin, zmax = 0, float(np.nanmax(z.values)) if z.size else 1
+    fig = go.Figure(go.Heatmap(
+        x=z.columns, y=z.index, z=z.values, zmin=zmin, zmax=zmax,
+        colorscale=[[0.0, COLORS["primary"]], [1.0, "#EEF3F8"]], colorbar=colorbar,
+        hovertemplate=hover, xgap=1, ygap=1,
+    ))
+    fig = _style(fig, title or "Price observations by index", "", hovermode="closest")
+    fig.update_yaxes(autorange="reversed", showgrid=False, type="category")
+    fig.update_xaxes(showgrid=False)
+    fig.update_layout(height=max(300, 22 * len(z.index) + 160))
+    return fig

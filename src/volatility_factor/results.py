@@ -25,18 +25,16 @@ DATE_COLUMNS = [
     "StartingValueDate",
 ]
 
-__all__ = ["CONFIDENCE_LEVELS", "VaRResult", "to_long"]
-
 
 @dataclass(frozen=True)
 class VaRResult(Mapping):
     """Output of :meth:`GarchSim.simulate`.
 
-    Behaves like the original result dict (``result["VaR_99"]``, ``dict(result)``) and
-    also keeps the simulation arrays.
+    Behaves like a read-only dict of the results (``result["VaR_99"]``, ``dict(result)``)
+    and also keeps the simulation arrays.
 
     Attributes:
-        record: the result dict, in the original key order.
+        record: the result dict (settings first, then the VaR columns).
         sim_paths: ``(nsims, horizon)`` simulated one-day log returns (portfolio level).
         nday_returns: rolling ``ndays`` sums of the forecast part of each path
             (rows = rolling windows, columns = simulations).
@@ -50,17 +48,20 @@ class VaRResult(Mapping):
 
     # Mapping interface ---------------------------------------------------------
     def __getitem__(self, key: str) -> Any:
+        """Value from the result dict."""
         return self.record[key]
 
     def __iter__(self) -> Iterator[str]:
+        """Iterate over the result dict's keys."""
         return iter(self.record)
 
     def __len__(self) -> int:
+        """Number of keys in the result dict."""
         return len(self.record)
 
     # Conversions ---------------------------------------------------------------
     def to_dict(self) -> dict[str, Any]:
-        """The original wide result dict (a copy)."""
+        """The result dict, one key per output column (a copy)."""
         return dict(self.record)
 
     def to_frame(self) -> pd.DataFrame:
@@ -88,6 +89,7 @@ class VaRResult(Mapping):
         return var_distribution_plot(self, **kwargs)
 
     def __repr__(self) -> str:
+        """Tickers, method, liquidation days and the 50th and 99th percentile VaR."""
         keys = ("Tickers", "Method", "NDays", "VaR_50", "VaR_99")
         body = ", ".join(f"{k}={self.record.get(k)!r}" for k in keys)
         return f"VaRResult({body})"
@@ -96,13 +98,13 @@ class VaRResult(Mapping):
 def to_long(results: pd.DataFrame | list[Mapping[str, Any]]) -> pd.DataFrame:
     """Melt wide GARCH results to one row per VaR quantile (the saved ``.parquet`` layout).
 
-    Same transformation as the original notebook, including keeping ``LogVaR_99`` as an
-    id column.
+    ``LogVaR_99`` is kept as an id column; the other ``LogVaR_*`` columns are dropped.
     """
     df = pd.DataFrame.from_records(results) if not isinstance(results, pd.DataFrame) else results
+    if df.columns.empty:
+        return pd.DataFrame(columns=["VaRQ", "VaR"])
     df = df.copy()
-    # The original excluded "Log_VaR_99" (sic), so LogVaR_99 stays as an id column.
-    excluded = ["LogVaR_50", "LogVaR_75", "LogVaR_95", "Log_VaR_99", *VAR_COLUMNS]
+    excluded = [*LOG_VAR_COLUMNS[:-1], *VAR_COLUMNS]
     id_cols = [c for c in df.columns if c not in excluded]
     date_cols = [c for c in DATE_COLUMNS if c in df.columns]
     df[date_cols] = df[date_cols].apply(pd.to_datetime)

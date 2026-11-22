@@ -1,7 +1,8 @@
 """Quarterly performance monitoring: F-tests, exception counts and shortfalls.
 
-These functions hold the logic from ``monitoring_main.ipynb``. Each returns a DataFrame
-in the same layout the notebook saved to Excel.
+Each report function returns a DataFrame laid out for saving to Excel. Windows are
+described by :class:`MonitoringPeriods` (the full sample, its last year, and the quarters
+that follow).
 """
 
 from __future__ import annotations
@@ -19,19 +20,9 @@ from volatility_factor.config import FactorConfig, get_config
 from volatility_factor.data import VarData, get_data
 from volatility_factor.garch import GarchSim
 
-__all__ = [
-    "EXCEPTION_ADJUSTMENT",
-    "MonitoringPeriods",
-    "f_monitor",
-    "f_test_report",
-    "nday_exceptions",
-    "one_day_exceptions",
-    "shortfall_report",
-]
-
 # Exceptions removed when the independence test rejects (keyed by total exceptions).
-# Copied verbatim from the monitoring notebook. Note: the entries for 28-30 (1) and 36 (36)
-# look like typos for 10 and 13; they are kept as-is pending confirmation.
+# Note: the entries for 28-30 (1) and 36 (36) look like typos for 10 and 13; they are kept
+# as-is pending confirmation.
 EXCEPTION_ADJUSTMENT = {
     0: 0, 1: 0, 2: 1, 3: 2, 4: 2, 5: 2, 6: 2, 7: 3, 8: 3, 9: 3, 10: 3, 11: 4, 12: 4, 13: 4,
     14: 5, 15: 5, 16: 5, 17: 5, 18: 6, 19: 6, 20: 6, 21: 7, 22: 7, 23: 8, 24: 8, 25: 8,
@@ -63,6 +54,13 @@ class MonitoringPeriods:
     def from_sample_end(
         cls, sample_end: str, sample_years: int = 9, n_quarters: int = 5
     ) -> MonitoringPeriods:
+        """Build the windows from the sample end date.
+
+        Args:
+            sample_end: last day of the sample (a month end).
+            sample_years: length of the full sample in years.
+            n_quarters: number of quarters after the sample to include.
+        """
         end = pd.Timestamp(sample_end)
         fmt = "%Y-%m-%d"
         full = ((end - pd.DateOffset(years=sample_years) + pd.Timedelta(days=1)).strftime(fmt),
@@ -88,6 +86,7 @@ class MonitoringPeriods:
 
 
 def _factor_weights(factor: FactorConfig, use_config_weights: bool) -> list[float] | None:
+    """The factor's weights, or ``None`` (equal weights) when not using configured weights."""
     return factor.weight_list if use_config_weights else None
 
 
@@ -140,8 +139,8 @@ def f_test_report(
     """F-statistics for every configured factor and quarter (columns prefixed by quarter).
 
     Args:
-        use_config_weights: weight portfolios as configured. The original notebook used
-            equal weights here; pass ``False`` to reproduce that.
+        use_config_weights: weight portfolios as configured; ``False`` uses equal
+            weights.
     """
     cfg = get_config(config)
     data = get_data(data, cfg)
@@ -176,6 +175,22 @@ def _monitoring_var(
     var_level: float,
     data: Any,
 ) -> float:
+    """GARCH ``custom_normal`` VaR over the full monitoring sample.
+
+    Args:
+        factor_or_tickers: configured factor, or ticker(s).
+        weights: portfolio weights.
+        ndays: liquidation period.
+        periods: monitoring windows (the full sample is used for fitting).
+        start_vals: ``(date, quantile)`` starting values.
+        horizon1, horizon2, nsims: simulation settings (``horizon2 + ndays - 1`` days are
+            simulated after the lag).
+        var_level: VaR percentile to return.
+        data: pricing data.
+
+    Returns:
+        Arithmetic VaR in percent.
+    """
     tickers = (
         factor_or_tickers.ticker_list
         if isinstance(factor_or_tickers, FactorConfig)
@@ -204,9 +219,8 @@ def one_day_exceptions(
     """One-day VaR exceptions per factor, counted by quarter.
 
     Args:
-        use_config_weights: backtest with the configured weights (the VaR always uses
-            them). The original notebook backtested with equal weights; pass ``False`` to
-            reproduce that.
+        use_config_weights: backtest with the configured weights; ``False`` backtests
+            with equal weights. The VaR itself always uses the configured weights.
     """
     cfg = get_config(config)
     data = get_data(data, cfg)
@@ -277,7 +291,7 @@ def nday_exceptions(
                              weights=_factor_weights(factor, use_config_weights),
                              start_date=window[0], end_date=window[1], var=nday_var,
                              var_is_log=False, data=data)
-            ind = log_likelihood_test(bt.break_series)
+            ind = log_likelihood_test(bt.break_series, converge_rate=1 - var_level)
             total = bt.break_series.sum()
             adjustment = exception_adjustment(total, ind.get("Independence") != "RejectNull")
             frames.append(pd.DataFrame({

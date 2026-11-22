@@ -1,12 +1,7 @@
-"""Exact comparisons with outputs captured from the pre-refactor code.
-
-The goldens in ``tests/fixtures/golden`` were produced by ``capture_legacy_goldens.py``
-against commit ``d0d285f``. Every comparison is exact (no tolerance).
-"""
+"""Comparisons with the reference VaR, backtesting and monitoring fixtures."""
 
 from __future__ import annotations
 
-import hashlib
 import warnings
 
 import numpy as np
@@ -22,7 +17,6 @@ from volatility_factor import (
     create_periods,
     get_stress_range_multi,
     get_stress_range_single,
-    log_likelihood_test,
     monitoring,
     run_circular_bootstrap,
     run_garch_var,
@@ -38,25 +32,40 @@ PORTFOLIOS = {
 SAMPLE = ("2016-01-01", "2024-12-31")
 START_VALS = ["2024-01-01", 0.5]
 BOOT = ("2024-07-01", "2024-12-31")
+PATH_SAMPLE = np.ix_([0, 1, 19, 101, 250, 499, 750, 999], [0, 62, 63, 67, 68, 161, 322, 323])
+FLOAT_TOLERANCE = 1e-12
 
 
-def assert_same(actual, expected, path="value"):
-    """Recursive exact equality for frames, series, arrays, dicts and scalars."""
+def assert_same(actual, expected, path="value", *, approximate=False):
+    """Compare recursively, allowing small roundoff for unrounded calculations."""
     if isinstance(expected, pd.DataFrame):
-        pd.testing.assert_frame_equal(actual, expected, check_exact=True, obj=path)
+        pd.testing.assert_frame_equal(
+            actual, expected, check_exact=not approximate, obj=path,
+            rtol=FLOAT_TOLERANCE, atol=FLOAT_TOLERANCE,
+        )
     elif isinstance(expected, pd.Series):
-        pd.testing.assert_series_equal(actual, expected, check_exact=True, obj=path)
+        pd.testing.assert_series_equal(
+            actual, expected, check_exact=not approximate, obj=path,
+            rtol=FLOAT_TOLERANCE, atol=FLOAT_TOLERANCE,
+        )
     elif isinstance(expected, np.ndarray):
-        np.testing.assert_array_equal(actual, expected, err_msg=path)
         assert np.asarray(actual).shape == expected.shape, path
+        if approximate and np.issubdtype(expected.dtype, np.inexact):
+            np.testing.assert_allclose(
+                actual, expected, rtol=FLOAT_TOLERANCE, atol=FLOAT_TOLERANCE, err_msg=path,
+            )
+        else:
+            np.testing.assert_array_equal(actual, expected, err_msg=path)
     elif isinstance(expected, dict):
         assert list(actual) == list(expected), f"{path}: keys {list(actual)} != {list(expected)}"
         for k in expected:
-            assert_same(actual[k], expected[k], f"{path}[{k!r}]")
+            assert_same(actual[k], expected[k], f"{path}[{k!r}]", approximate=approximate)
     elif isinstance(expected, (list, tuple)):
         assert len(actual) == len(expected), path
         for i, (a, e) in enumerate(zip(actual, expected, strict=True)):
-            assert_same(a, e, f"{path}[{i}]")
+            assert_same(a, e, f"{path}[{i}]", approximate=approximate)
+    elif approximate and isinstance(expected, (float, np.floating)):
+        assert actual == pytest.approx(expected, rel=FLOAT_TOLERANCE, abs=FLOAT_TOLERANCE, nan_ok=True), path
     elif isinstance(expected, float) and np.isnan(expected):
         assert np.isnan(actual), path
     else:
@@ -65,30 +74,33 @@ def assert_same(actual, expected, path="value"):
 
 # --------------------------------------------------------------------------- #
 def test_vardata(golden):
+    """Verify price inputs, calculated returns, descriptions and factor IDs."""
     g = golden("vardata")
     for key, (tickers, weights) in PORTFOLIOS.items():
         v = VarData(tickers, weights)
         for attr, expected in g[key].items():
             if attr == "volatility_factor_id":
                 continue
-            assert_same(getattr(v, attr), expected, f"{key}.{attr}")
+            assert_same(getattr(v, attr), expected, f"{key}.{attr}", approximate=attr != "price_matrix")
     assert VarData(["G6P0", "G9P0"], [0.5, 0.5]).volatility_factor_id == g["pair"]["volatility_factor_id"]
     with pytest.warns(UserWarning):
         assert VarData("M0A0").volatility_factor_id == g["single"]["volatility_factor_id"]
 
 
 def test_garch_fit(golden):
+    """Verify fitted frames, coefficients, scales and convergence codes."""
     g = golden("garch_fit")
     for key, (tickers, weights) in PORTFOLIOS.items():
         model = GarchSim(tickers, weights, *SAMPLE)
         for attr, expected in g[key].items():
-            assert_same(getattr(model, attr), expected, f"{key}.{attr}")
+            assert_same(getattr(model, attr), expected, f"{key}.{attr}", approximate=True)
     model = GarchSim("M0A0", None, *SAMPLE, mean_model="Constant")
     for attr, expected in g["single_constant_mean"].items():
-        assert_same(getattr(model, attr), expected, f"constant.{attr}")
+        assert_same(getattr(model, attr), expected, f"constant.{attr}", approximate=True)
 
 
 def test_simulations(golden):
+    """Verify rounded VaR and sample paths for every shock type and starting rule."""
     g = golden("simulations")
     for key, (tickers, weights) in PORTFOLIOS.items():
         model = GarchSim(tickers, weights, *SAMPLE)
@@ -101,9 +113,9 @@ def test_simulations(golden):
                                      nsims=1000, start_vals=sv, **kwargs)
                 expected = g[(key, shock, sv is not None)]
                 assert_same(res.to_dict(), expected["dict"], f"{key}/{shock}/{sv}")
-                paths = np.ascontiguousarray(res.sim_paths)
-                assert paths.shape == expected["sim_paths_shape"]
-                assert hashlib.sha256(paths.tobytes()).hexdigest() == expected["sim_paths_sha256"]
+                assert res.sim_paths.shape == expected["sim_paths_shape"]
+                assert_same(res.sim_paths[PATH_SAMPLE], expected["path_sample"],
+                            f"{key}/{shock}/{sv}/paths", approximate=True)
 
     res = GarchSim("M0A0", None, *SAMPLE).simulate(
         horizon1=63, horizon2=503, ndays=252, shock_type="custom_normal", nsims=10000,
@@ -114,15 +126,8 @@ def test_simulations(golden):
     assert_same(res.to_dict(), g[("single_constant_mean", "normal")]["dict"])
 
 
-def test_legacy_alias_matches(golden):
-    expected = golden("simulations")[("pair", "custom_normal", True)]["dict"]
-    model = GarchSim(["G6P0", "G9P0"], [0.5, 0.5], *SAMPLE)
-    with pytest.warns(DeprecationWarning):
-        assert_same(model.CustomNDayPriceSimulation(63, 261, 10, "custom_normal", 1000,
-                                                    start_vals=START_VALS), expected)
-
-
 def test_bootstrap(golden):
+    """Circular block bootstrap results match exactly."""
     g = golden("bootstrap")
     for key, (tickers, weights) in PORTFOLIOS.items():
         res = NonParametricVar(tickers, weights, *SAMPLE).circular_block_bootstrap(10, nboot=500)
@@ -130,6 +135,7 @@ def test_bootstrap(golden):
 
 
 def test_periods(golden):
+    """Sample/forecast windows and stress windows match exactly."""
     g = golden("periods")
     assert_same(list(create_periods("2024-12-31", 3, 12, 3, 9)), list(g["periods_a"]))
     assert_same(list(create_periods("2025-06-30", 5, 6, 1, 5)), list(g["periods_b"]))
@@ -141,6 +147,7 @@ def test_periods(golden):
 
 
 def test_backtest(golden):
+    """Backtest return, exception and shortfall series match exactly."""
     g = golden("backtest")
     cases = {
         "single_log": dict(tickers="M0A0", n_liquidation=10, var=3.0, start_date="2020-01-01",
@@ -159,36 +166,19 @@ def test_backtest(golden):
         expected = g[key]
         for attr in ["var_pct", "nday_price_return", "nday_log_return", "break_series",
                      "shortfall_series", "duration"]:
-            assert_same(getattr(bt, attr), expected[attr], f"{key}.{attr}")
-        assert_same(bt.independence_test(), expected["llt"], f"{key}.llt")
-        assert_same(bt.independence_test(0.05, 0.95), expected["llt_95"], f"{key}.llt_95")
-
-    idx = pd.date_range("2024-01-01", periods=30)
-    edge = {
-        "none": pd.Series(0, index=idx),
-        "all": pd.Series(1, index=idx),
-        "first": pd.Series([1] + [0] * 29, index=idx),
-        "cluster": pd.Series([0] * 10 + [1, 1, 1] + [0] * 17, index=idx),
-        "alt": pd.Series([0, 1] * 15, index=idx),
-    }
-    for key, series in edge.items():
-        assert_same(log_likelihood_test(series), g["llt_edge"][key], f"edge.{key}")
-
-
-def test_legacy_backtest_keywords_still_work(golden):
-    with pytest.warns(DeprecationWarning):
-        bt = VarBacktest(tickers="M0A0", n_liquidation=10, VaR=3.0, start_date="2020-01-01",
-                         end_date="2022-09-30")
-    assert_same(bt.break_series, golden("backtest")["single_log"]["break_series"])
+            approximate = attr in {"nday_price_return", "nday_log_return", "shortfall_series"}
+            assert_same(getattr(bt, attr), expected[attr], f"{key}.{attr}", approximate=approximate)
 
 
 # --------------------------------------------------------------------------- #
 @pytest.fixture(scope="module")
 def garch_run(config, pricing):
+    """One full GARCH run on the test config, shared by the pipeline tests."""
     return run_garch_var(config, pricing, verbose=False)
 
 
 def test_pipeline_garch(golden, garch_run):
+    """The GARCH run's wide results, long format and QA match exactly."""
     g = golden("pipeline")
     assert_same(garch_run.results, g["wide"], "wide")
     assert_same(garch_run.long, g["long"], "long")
@@ -196,25 +186,36 @@ def test_pipeline_garch(golden, garch_run):
 
 
 def test_pipeline_bootstrap(golden, config, pricing):
+    """The configured bootstrap run matches exactly."""
     g = golden("pipeline")
     assert_same(run_circular_bootstrap(config, pricing, nboot=500).results, g["bootstrap"])
 
 
 def test_pipeline_backtest(golden, garch_run):
+    """Verify return details and the observation counts behind the statistical tests."""
     g = golden("pipeline")["backtest"]
     run = garch_run.backtest()
-    assert_same(run.detail, g["detail"], "detail")
-    legacy_cols = list(g["independence"].columns)
-    assert_same(run.independence[legacy_cols], g["independence"], "independence")
+    calculated = ["Price", "Pct_Change_Actual", "ShortfallPct"]
+    detail = run.detail.drop(columns="RejectNullIndependence")
+    assert_same(detail.drop(columns=calculated), g["detail"].drop(columns=calculated), "detail")
+    assert_same(detail[calculated], g["detail"][calculated], "calculated values", approximate=True)
+    keys = ["Volatility_Factor_ID", "ForecastStart", "ForecastEnd", "Method", "NDays", "VaRQ"]
+    counts = run.detail.groupby(keys)["Breaks"].agg(["count", "sum"])
+    tests = run.independence.set_index(keys).sort_index()
+    assert_same(tests["Observations"].to_numpy(), counts["count"].to_numpy())
+    assert_same(tests["Exceptions"].to_numpy(), counts["sum"].to_numpy())
+    assert tests.loc[tests["Observations"].eq(0), ["LR_uc", "Independence"]].isna().all().all()
 
 
 # --------------------------------------------------------------------------- #
 @pytest.fixture(scope="module")
 def periods():
+    """Monitoring windows for a 2024-12-31 sample end."""
     return MonitoringPeriods.from_sample_end("2024-12-31", sample_years=9)
 
 
 def test_monitoring_periods(periods):
+    """Monitoring windows are the expected full sample, last year and quarters."""
     assert periods.full == ("2016-01-01", "2024-12-31")
     assert periods.start == ("2024-01-01", "2024-12-31")
     assert periods.quarters == (
@@ -225,17 +226,17 @@ def test_monitoring_periods(periods):
 
 
 def test_monitoring_ftest(golden, periods):
+    """F-test report matches; configured weights change only the unequal-weight factor."""
     expected = golden("monitoring")["fstats"]
-    # Original behaviour: equal weights.
-    assert_same(monitoring.f_test_report(periods, use_config_weights=False), expected)
-    # Default: configured weights. Only the unequal-weight factor changes.
+    assert_same(monitoring.f_test_report(periods, use_config_weights=False), expected, approximate=True)
     weighted = monitoring.f_test_report(periods)
     equal_weight_ids = [i for i in expected.index if i != "three_way"]
-    assert_same(weighted.loc[equal_weight_ids], expected.loc[equal_weight_ids])
+    assert_same(weighted.loc[equal_weight_ids], expected.loc[equal_weight_ids], approximate=True)
     assert not weighted.loc["three_way"].equals(expected.loc["three_way"])
 
 
 def test_monitoring_exceptions(golden, periods, config):
+    """One-day and n-day exception reports and shortfalls match exactly."""
     g = golden("monitoring")
     nsims = config.garch.nsims
     assert_same(

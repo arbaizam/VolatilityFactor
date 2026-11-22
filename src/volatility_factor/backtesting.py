@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property
@@ -13,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 import scipy.stats
+from scipy.special import xlog1py, xlogy
 
 from volatility_factor._utils import validate_date
 from volatility_factor.config import get_config
@@ -22,90 +22,69 @@ from volatility_factor.results import LOG_VAR_COLUMNS, VAR_COLUMNS
 if TYPE_CHECKING:
     import plotly.graph_objects as go
 
-__all__ = ["BacktestRun", "VarBacktest", "log_likelihood_test", "run_backtests"]
 
-_UNSET = object()
+def _binomial_log_likelihood(exceptions, observations, rate):
+    """Log likelihood for binary outcomes at the given exception rate."""
+    return xlogy(exceptions, rate) + xlog1py(observations - exceptions, -rate)
 
 
 def log_likelihood_test(
     break_ser: Sequence[int] | pd.Series, converge_rate: float = 0.01, alpha: float = 0.99
 ) -> dict[str, Any]:
-    """Kupiec (1995) unconditional coverage and Christoffersen (1998) independence tests.
+    """Kupiec unconditional coverage and Christoffersen independence and coverage tests.
 
     Args:
-        break_ser: 1 for an exception (break), 0 otherwise, in date order.
+        break_ser: 1 for an exception (break), 0 otherwise, in observation order.
         converge_rate: expected exception rate under the null.
         alpha: confidence level for the chi-squared critical values.
 
     Returns:
-        Dict with ``Exceptions``, ``LR_uc``, ``LR_ind``, ``LR_cc``, the chi-squared
-        critical values, ``Independence`` (``"RejectNull"`` or ``None``), ``alpha`` and
-        ``converge_rate`` (both in percent).
+        Observation and exception counts, likelihood-ratio statistics, critical values and
+        the independence decision. Unavailable statistics are NaN. An independence
+        rejection is reported as ``"RejectNull"``, otherwise the decision is ``None``.
 
-    Note:
-        This reproduces the original implementation exactly, including two details that
-        differ from the textbook test: the first observation is counted once more in the
-        transition counts, and ``pi0 = T01 / (T - N)``.
+    The unconditional coverage test uses all observations. The transition likelihoods
+    condition on the first observation and require both states in the transition margins.
     """
     values = np.asarray(break_ser)
-    T = len(values)
-    N = values.sum()
+    if values.ndim != 1 or not np.isin(values, (0, 1)).all():
+        raise ValueError("break_ser must be a one-dimensional sequence of 0s and 1s")
+    if not 0 < converge_rate < 1 or not 0 < alpha < 1:
+        raise ValueError("converge_rate and alpha must be between 0 and 1")
 
-    with warnings.catch_warnings(), np.errstate(all="ignore"):
-        warnings.simplefilter("ignore")
+    values = values.astype(np.intp)
+    observations = values.size
+    exceptions = int(values.sum())
+    lr_uc = lr_ind = lr_cc = np.nan
+    if observations:
+        fitted = _binomial_log_likelihood(exceptions, observations, exceptions / observations)
+        null = _binomial_log_likelihood(exceptions, observations, converge_rate)
+        lr_uc = 2 * (fitted - null)
 
-        # Kupiec (1995)
-        if N == T:
-            LR_uc = float("inf")
-        else:
-            LR_uc = -2 * np.log((1 - converge_rate) ** (T - N) * (converge_rate**N)) + 2 * np.log(
-                (1 - N / T) ** (T - N) * (N / T) ** N
-            )
-
-        # Christoffersen (1998)
-        T00, T01, T10, T11 = 0, 0, 0, 0
-        for i in range(T - 1):
-            if i == 0:
-                if values[0] == 0:
-                    T00 = T00 + 1
-                else:
-                    T01 = T01 + 1
-            if values[i] == 0:
-                if values[i + 1] == 0:
-                    T00 = T00 + 1
-                else:
-                    T01 = T01 + 1
-            elif values[i] == 1:
-                if values[i + 1] == 0:
-                    T10 = T10 + 1
-                else:
-                    T11 = T11 + 1
-
-        if N == T:
-            LR_ind = float("inf")
-        elif N == 0:
-            LR_ind = 0
-        else:
-            pi0 = 1 if T00 == 0 else T01 / (T - N)
-            pi = N / T
-            pi1 = T11 / N
-            LR_ind = -2 * np.log((1 - pi) ** (T00 + T10) * pi ** (T01 + T11)) + 2 * np.log(
-                (1 - pi0) ** T00 * pi0**T01 * (1 - pi1) ** T10 * pi1**T11
-            )
-
-        LR_cc = LR_uc + LR_ind
+    transitions = np.bincount(2 * values[:-1] + values[1:], minlength=4).reshape(2, 2)
+    origins = transitions.sum(axis=1)
+    destinations = transitions.sum(axis=0)
+    if origins.all() and destinations.all():
+        fitted = _binomial_log_likelihood(transitions[:, 1], origins, transitions[:, 1] / origins).sum()
+        total = int(destinations.sum())
+        hits = int(destinations[1])
+        independent = _binomial_log_likelihood(hits, total, hits / total)
+        null = _binomial_log_likelihood(hits, total, converge_rate)
+        lr_ind = 2 * (fitted - independent)
+        lr_cc = 2 * (fitted - null)
 
     chi2_1 = scipy.stats.chi2.ppf(alpha, 1)
     chi2_2 = scipy.stats.chi2.ppf(alpha, 2)
 
     return {
-        "Exceptions": values.sum(),
-        "LR_uc": round(LR_uc, 3),
-        "LR_ind": round(LR_ind, 3),
-        "LR_cc": round(LR_cc, 3),
+        "Observations": observations,
+        "Exceptions": exceptions,
+        "LR_uc": round(lr_uc, 3),
+        "LR_ind": round(lr_ind, 3),
+        "LR_cc": round(lr_cc, 3),
         f"chi2(1) {int(alpha * 100)}%": round(chi2_1, 3),
         f"chi2(2) {int(alpha * 100)}%": round(chi2_2, 3),
-        "Independence": "RejectNull" if LR_ind > chi2_1 else None,
+        "Independence": "RejectNull" if lr_ind > chi2_1 else None,
         "alpha": round(alpha * 100, 1),
         "converge_rate": round(converge_rate * 100, 1),
     }
@@ -116,9 +95,11 @@ def _setting(name: str, validator=None) -> property:
     private = f"_{name}"
 
     def getter(self):
+        """Return the stored setting."""
         return getattr(self, private)
 
     def setter(self, value):
+        """Validate and store the setting, then clear cached backtest results."""
         if validator is not None:
             value = validator(value, name)
         setattr(self, private, value)
@@ -128,6 +109,15 @@ def _setting(name: str, validator=None) -> property:
 
 
 def _optional_date(value, name):
+    """Validate an optional ``YYYY-MM-DD`` date setting.
+
+    Args:
+        value: the date, or ``None``.
+        name: setting name used in the error message.
+
+    Returns:
+        The date string, or ``None``.
+    """
     return validate_date(value, name, optional=True)
 
 
@@ -179,19 +169,9 @@ class VarBacktest(VarData):
         var: float | None = None,
         var_is_log: bool = True,
         forward_shift: bool = False,
-        *,
-        VaR: Any = _UNSET,  # noqa: N803 - deprecated keyword
-        VaR_is_log: Any = _UNSET,  # noqa: N803 - deprecated keyword
         **kwargs: Any,
     ):
-        if VaR is not _UNSET or VaR_is_log is not _UNSET:
-            warnings.warn(
-                "VarBacktest(VaR=..., VaR_is_log=...) is deprecated; use var= and var_is_log=.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            var = var if VaR is _UNSET else VaR
-            var_is_log = var_is_log if VaR_is_log is _UNSET else VaR_is_log
+        """Store the backtest settings; see the class docstring for arguments."""
         super().__init__(tickers, weights, **kwargs)
         self.start_date = start_date
         self.end_date = end_date
@@ -201,6 +181,7 @@ class VarBacktest(VarData):
         self.forward_shift = forward_shift
 
     def _reset_backtest(self) -> None:
+        """Clear cached results so they are recomputed with new settings."""
         for name in self._BACKTEST_CACHE:
             self.__dict__.pop(name, None)
 
@@ -224,12 +205,27 @@ class VarBacktest(VarData):
         """VaR as a decimal arithmetic return (log VaR is converted first)."""
         if self.var is None:
             raise ValueError("var is required (pass var=... or call with_var())")
+        if not np.isfinite(self.var):
+            raise ValueError("var must be finite")
         if self.var_is_log:
             return -(np.exp(-self.var / 100) - 1)
         return self.var / 100
 
     def _nday_change(self, frame: pd.DataFrame, log: bool) -> pd.Series:
-        df = frame.sort_index().copy()
+        """N-day change of ``frame`` within the backtest window, weighted for a portfolio.
+
+        Args:
+            frame: prices (``log=False``) or log prices (``log=True``), one column per index.
+            log: compute log differences instead of percentage changes.
+
+        Returns:
+            Series of n-day changes between ``start_date`` and ``end_date``.
+        """
+        df = frame.sort_index()
+        valid = np.isfinite(df)
+        if not log:
+            valid &= df.gt(0)
+        df = df.where(valid)
         n = self.n_liquidation
         if log:
             chg = df.shift(-n) - df if self.forward_shift else df - df.shift(n)
@@ -239,7 +235,8 @@ class VarBacktest(VarData):
             chg = pd.Series(data=chg.iloc[:, 0].values, index=df.index)
         else:
             chg = pd.Series(data=chg.dot(self.weights), index=df.index)
-        return chg[self.start_date : self.end_date].dropna()
+        chg = chg[self.start_date : self.end_date]
+        return chg[np.isfinite(chg)]
 
     @cached_property
     def nday_price_return(self) -> pd.Series:
@@ -263,7 +260,7 @@ class VarBacktest(VarData):
 
     @cached_property
     def duration(self) -> list[int]:
-        """Days between consecutive breaks."""
+        """Observations (rows, not calendar days) between consecutive breaks."""
         breaks = np.array(self.break_series)
         breaks = np.insert(breaks, 0, 1)
         breaks = np.append(breaks, 1)
@@ -336,6 +333,7 @@ class BacktestRun:
 
 
 def _as_date_str(value: Any) -> str:
+    """Format any date-like value as ``YYYY-MM-DD``."""
     return pd.to_datetime(value).strftime("%Y-%m-%d")
 
 
@@ -344,7 +342,7 @@ def run_backtests(
     *,
     data: Any = None,
     config: Any = None,
-    converge_rate: float = 0.01,
+    converge_rate: float | None = None,
     alpha: float = 0.99,
     pad_incomplete: bool = True,
 ) -> BacktestRun:
@@ -358,16 +356,19 @@ def run_backtests(
         results: wide results with at least ``Volatility_Factor_ID, Tickers, Weights,
             ForecastStart, ForecastEnd, Method, NDays`` and the ``VaR_*`` columns.
         data, config: pricing data / config (see :class:`~volatility_factor.data.VarData`).
-        converge_rate, alpha: passed to :func:`log_likelihood_test`.
+        converge_rate: override the expected exception rate for every VaR quantile.
+            By default, each quantile uses its own expected exception rate.
+        alpha: confidence level for the chi-squared critical values.
         pad_incomplete: when prices end inside a forecast window, extend the detail with
             calendar dates through the window end (no prices or returns on those dates).
-            This replaces the hard-coded "UPDATE" dates in the original notebook.
 
     Returns:
         :class:`BacktestRun` with ``detail`` and ``independence`` frames.
     """
-    data = get_data(data, config)
     wide = pd.DataFrame.from_records(results) if not isinstance(results, pd.DataFrame) else results
+    if wide.empty:
+        return BacktestRun(detail=pd.DataFrame(), independence=pd.DataFrame())
+    data = get_data(data, config)
     id_vars = [c for c in wide.columns if c not in VAR_COLUMNS and c not in LOG_VAR_COLUMNS]
     long = pd.melt(wide, id_vars=id_vars, value_vars=VAR_COLUMNS, var_name="VaRQ", value_name="VaR")
 
@@ -379,7 +380,9 @@ def run_backtests(
         weights = [float(w) for w in str(row.Weights).split(";")]
         forecast_start = _as_date_str(row.ForecastStart)
         forecast_end = _as_date_str(row.ForecastEnd)
-        varq = str(row.VaRQ)[-2:] + "Q"
+        quantile = int(row.VaRQ.rsplit("_", 1)[1])
+        varq = f"{quantile}Q"
+        rate = (100 - quantile) / 100 if converge_rate is None else converge_rate
 
         key = (tuple(tickers), tuple(weights), row.Volatility_Factor_ID)
         if key not in portfolios:
@@ -391,16 +394,17 @@ def run_backtests(
         )
 
         df = pd.DataFrame(data=None, index=bt.price_matrix[forecast_start:forecast_end].index)
-        if df.shape[0] == 0:
-            df = pd.DataFrame(data=None, index=pd.date_range(start=forecast_start, end=forecast_end))
-        elif pad_incomplete:
-            last_price_date = bt.price_matrix.index.max()
-            window_end = pd.Timestamp(forecast_end)
-            if df.index.max() == last_price_date and last_price_date < window_end:
-                pad = pd.date_range(start=last_price_date + pd.Timedelta(days=1), end=window_end)
-                df = pd.concat([df, pd.DataFrame(data=None, index=pad)])
+        if pad_incomplete:
+            if df.index.empty:
+                df = pd.DataFrame(index=pd.date_range(start=forecast_start, end=forecast_end))
+            else:
+                last_price_date = bt.price_matrix.index.max()
+                window_end = pd.Timestamp(forecast_end)
+                if df.index.max() == last_price_date and last_price_date < window_end:
+                    pad = pd.date_range(start=last_price_date + pd.Timedelta(days=1), end=window_end)
+                    df = pd.concat([df, pd.DataFrame(index=pad)])
 
-        ind_test = bt.independence_test(converge_rate=converge_rate, alpha=alpha)
+        ind_test = bt.independence_test(converge_rate=rate, alpha=alpha)
         ind_test.update({
             "Volatility_Factor_ID": bt.volatility_factor_id,
             "ForecastStart": _as_date_str(bt.start_date),
@@ -410,6 +414,9 @@ def run_backtests(
             "VaRQ": varq,
         })
         ind_dicts.append(ind_test)
+
+        if df.index.empty:
+            continue
 
         df["Date"] = df.index
         df["Volatility_Factor_ID"] = bt.volatility_factor_id
@@ -423,7 +430,9 @@ def run_backtests(
         df["Pct_Change_Actual"] = bt.nday_price_return
         df["Breaks"] = bt.break_series
         df["ShortfallPct"] = bt.shortfall_series
-        df["RejectNullIndependence"] = np.where(ind_test.get("Independence") == "RejectNull", 1, 0)
+        decision = ind_test["Independence"]
+        rejected = pd.NA if pd.isna(ind_test["LR_ind"]) else int(decision == "RejectNull")
+        df["RejectNullIndependence"] = pd.Series(rejected, index=df.index, dtype="Int8")
         bt_frames.append(df)
 
     detail = pd.concat(bt_frames).reset_index(drop=True) if bt_frames else pd.DataFrame()
