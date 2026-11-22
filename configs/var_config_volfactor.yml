@@ -1,6 +1,8 @@
 ---
 data_settings:
-  loc_output: output
+  # Paths are relative to this file's directory.
+  pricing_data: ../data/pricing_data_combined.csv
+  loc_output: ../output
   output_filename: combined_vars_2024-12-31.xlsx
 
 garch_settings:
